@@ -95,6 +95,7 @@ from pyiceberg.typedef import (
     KeyDefaultDict,
     Properties,
     Record,
+    StructProtocol,
     TableVersion,
 )
 from pyiceberg.types import strtobool
@@ -2582,10 +2583,11 @@ class ManifestGroupPlanner:
             manifest_file for manifest_file in manifests if manifest_evaluators[manifest_file.partition_spec_id](manifest_file)
         ]
 
-        # step 2: filter the data files in each manifest
-        # this filter depends on the partition spec used to write the manifest file
+        # step 2: filter the data files in each manifest using a task-local partition evaluator
 
-        partition_evaluators: dict[int, Callable[[DataFile], bool]] = KeyDefaultDict(self._build_partition_evaluator)
+        partition_evaluator_factories: dict[int, Callable[[], Callable[[DataFile], bool]]] = KeyDefaultDict(
+            self._build_partition_evaluator_factory
+        )
 
         min_sequence_number = _min_sequence_number(manifests)
 
@@ -2596,7 +2598,7 @@ class ManifestGroupPlanner:
                 (
                     self.io,
                     manifest,
-                    partition_evaluators[manifest.partition_spec_id],
+                    partition_evaluator_factories[manifest.partition_spec_id](),
                     self._build_metrics_evaluator(),
                 )
                 for manifest in manifests
@@ -2659,16 +2661,26 @@ class ManifestGroupPlanner:
         spec = self.table_metadata.specs()[spec_id]
         return manifest_evaluator(spec, self.table_metadata.schema(), self.partition_filters[spec_id], self.case_sensitive)
 
-    def _build_partition_evaluator(self, spec_id: int) -> Callable[[DataFile], bool]:
+    def _build_partition_evaluator_factory(self, spec_id: int) -> Callable[[], Callable[[DataFile], bool]]:
         spec = self.table_metadata.specs()[spec_id]
         partition_type = spec.partition_type(self.table_metadata.schema())
         partition_schema = Schema(*partition_type.fields)
         partition_expr = self.partition_filters[spec_id]
 
-        # The lambda created here is run in multiple threads.
-        # So we avoid creating _EvaluatorExpression methods bound to a single
-        # shared instance across multiple threads.
-        return lambda data_file: expression_evaluator(partition_schema, partition_expr, self.case_sensitive)(data_file.partition)
+        # The schema and expression are immutable and can be cached per spec, while
+        # each manifest task gets its own mutable evaluator.
+        def partition_evaluator_factory() -> Callable[[DataFile], bool]:
+            evaluator: Callable[[StructProtocol], bool] | None = None
+
+            def partition_evaluator(data_file: DataFile) -> bool:
+                nonlocal evaluator
+                if evaluator is None:
+                    evaluator = expression_evaluator(partition_schema, partition_expr, self.case_sensitive)
+                return evaluator(data_file.partition)
+
+            return partition_evaluator
+
+        return partition_evaluator_factory
 
     def _build_metrics_evaluator(self) -> Callable[[DataFile], bool]:
         schema = self.table_metadata.schema()
