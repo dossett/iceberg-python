@@ -2673,16 +2673,23 @@ class ManifestGroupPlanner:
     def _build_metrics_evaluator(self) -> Callable[[DataFile], bool]:
         schema = self.table_metadata.schema()
         include_empty_files = strtobool(self.options.get("include_empty_files", "false"))
+        evaluator: _InclusiveMetricsEvaluator | None = None
 
-        # The lambda created here is run in multiple threads.
-        # So we avoid creating _InclusiveMetricsEvaluator methods bound to a single
-        # shared instance across multiple threads.
-        return lambda data_file: _InclusiveMetricsEvaluator(
-            schema,
-            self.row_filter,
-            self.case_sensitive,
-            include_empty_files,
-        ).eval(data_file)
+        # This callable is scoped to one manifest task, whose entries are processed
+        # sequentially. Initialize lazily so files rejected by the partition filter
+        # do not pay the metrics-evaluator setup cost.
+        def metrics_evaluator(data_file: DataFile) -> bool:
+            nonlocal evaluator
+            if evaluator is None:
+                evaluator = _InclusiveMetricsEvaluator(
+                    schema,
+                    self.row_filter,
+                    self.case_sensitive,
+                    include_empty_files,
+                )
+            return evaluator.eval(data_file)
+
+        return metrics_evaluator
 
     def _build_residual_evaluator(self, spec_id: int) -> Callable[[DataFile], ResidualEvaluator]:
         spec = self.table_metadata.specs()[spec_id]
