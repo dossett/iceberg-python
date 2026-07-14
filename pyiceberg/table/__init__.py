@@ -38,6 +38,7 @@ from pyiceberg.expressions.visitors import (
     _InclusiveMetricsEvaluator,
     bind,
     expression_evaluator,
+    extract_field_ids,
     inclusive_projection,
     manifest_evaluator,
 )
@@ -118,8 +119,8 @@ if TYPE_CHECKING:
 
 ALWAYS_TRUE = AlwaysTrue()
 DOWNCAST_NS_TIMESTAMP_TO_US_ON_WRITE = "downcast-ns-timestamp-to-us-on-write"
-# Retain a small working set for repeated partitions without adding unbounded key
-# storage when scans contain a distinct partition value for every data file.
+# Retain a small working set for repeated relevant partition values without adding
+# unbounded key storage when scans contain a distinct value for every data file.
 _RESIDUAL_CACHE_MAX_SIZE = 128
 
 
@@ -2625,13 +2626,24 @@ class ManifestGroupPlanner:
         delete_index = DeleteFileIndex()
 
         residual_evaluators: dict[int, ResidualEvaluator] = KeyDefaultDict(self._build_residual_evaluator)
-        # Residuals depend only on the scan configuration, partition spec, and partition value.
-        # Keep the cache local to this planning call and bounded for high-cardinality partition specs.
+        referenced_field_ids = extract_field_ids(
+            bind(self.table_metadata.schema(), self.row_filter, case_sensitive=self.case_sensitive)
+        )
+        partition_specs = self.table_metadata.specs()
+        residual_cache_key_positions: dict[int, tuple[int, ...]] = KeyDefaultDict(
+            lambda spec_id: tuple(
+                pos
+                for pos, partition_field in enumerate(partition_specs[spec_id].fields)
+                if partition_field.source_id in referenced_field_ids
+            )
+        )
+        # A residual can only depend on partition fields derived from source columns
+        # referenced by the scan filter. Keep the cache local and bounded.
         residual_cache: LRUCache[tuple[int, tuple[Any, ...]], BooleanExpression] = LRUCache(maxsize=_RESIDUAL_CACHE_MAX_SIZE)
 
         def residual_for(data_file: DataFile) -> BooleanExpression:
             partition = data_file.partition
-            partition_values = tuple(partition[pos] for pos in range(len(partition)))
+            partition_values = tuple(partition[pos] for pos in residual_cache_key_positions[data_file.spec_id])
             cache_key: tuple[int, tuple[Any, ...]] = data_file.spec_id, partition_values
             try:
                 return residual_cache[cache_key]

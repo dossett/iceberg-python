@@ -14,10 +14,10 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Benchmark residual evaluation for repeated and high-cardinality partitions.
+"""Benchmark residual evaluation with a high-cardinality irrelevant partition field.
 
-The repeated-partition case measures cache reuse. The unique-partition case
-exercises cache eviction and exposes overhead when every lookup misses.
+Every file has a unique unreferenced partition-hash value. The repeated case
+measures reuse by relevant partition values, while the unique case forces misses.
 
 Run with:
     uv run pytest tests/benchmark/test_scan_planning_benchmark.py -v -s -m benchmark
@@ -32,7 +32,9 @@ import pytest
 
 from pyiceberg.expressions import And, BooleanExpression, EqualTo, GreaterThanOrEqual, LessThanOrEqual, Or
 from pyiceberg.manifest import DataFile, DataFileContent, FileFormat, ManifestEntry, ManifestEntryStatus
+from pyiceberg.partitioning import PartitionField, PartitionSpec
 from pyiceberg.table import ManifestGroupPlanner, Table
+from pyiceberg.transforms import IdentityTransform
 from pyiceberg.typedef import Record
 
 
@@ -43,9 +45,9 @@ def _combined_filter() -> BooleanExpression:
         for predicate in (
             LessThanOrEqual("x", 6),
             EqualTo("y", source),
-            EqualTo("z", source),
             EqualTo("y", source + 1),
-            EqualTo("z", source + 1),
+            EqualTo("y", source + 2),
+            EqualTo("y", source + 3),
         ):
             branch = And(branch, predicate)
         branches.append(branch)
@@ -56,12 +58,12 @@ def _combined_filter() -> BooleanExpression:
     return combined
 
 
-def _manifest_entry(file_number: int, partition: int) -> ManifestEntry:
+def _manifest_entry(file_number: int, relevant_partition: int) -> ManifestEntry:
     data_file = DataFile.from_args(
         content=DataFileContent.DATA,
         file_path=f"s3://bucket/data-{file_number}.parquet",
         file_format=FileFormat.PARQUET,
-        partition=Record(partition),
+        partition=Record(relevant_partition, file_number),
         record_count=1,
         file_size_in_bytes=1,
     )
@@ -76,12 +78,22 @@ def _manifest_entry(file_number: int, partition: int) -> ManifestEntry:
 
 
 @pytest.mark.benchmark
-@pytest.mark.parametrize("num_partitions", [7, 2_000], ids=["repeated-partitions", "unique-partitions"])
-def test_residual_planning(table_v2: Table, monkeypatch: pytest.MonkeyPatch, num_partitions: int) -> None:
+@pytest.mark.parametrize(
+    "num_relevant_partitions",
+    [7, 2_000],
+    ids=["repeated-relevant-partitions", "unique-relevant-partitions"],
+)
+def test_residual_planning(table_v2: Table, monkeypatch: pytest.MonkeyPatch, num_relevant_partitions: int) -> None:
     num_files = 2_000
-    entries = [_manifest_entry(file_number, file_number % num_partitions) for file_number in range(num_files)]
+    entries = [_manifest_entry(file_number, file_number % num_relevant_partitions) for file_number in range(num_files)]
+    spec = PartitionSpec(
+        PartitionField(1, 1000, IdentityTransform(), "x"),
+        PartitionField(3, 1001, IdentityTransform(), "partition_hash"),
+        spec_id=0,
+    )
+    metadata = table_v2.metadata.model_copy(update={"partition_specs": [spec]})
     planner = ManifestGroupPlanner(
-        table_metadata=table_v2.metadata,
+        table_metadata=metadata,
         io=table_v2.io,
         row_filter=_combined_filter(),
     )
@@ -92,6 +104,6 @@ def test_residual_planning(table_v2: Table, monkeypatch: pytest.MonkeyPatch, num
 
     assert len(list(planner.plan_files([]))) == num_files
     print(
-        f"Planned {num_files} files across {num_partitions} partitions in "
+        f"Planned {num_files} files across {num_relevant_partitions} relevant partitions in "
         f"{statistics.mean(timings):.3f}s (best: {min(timings):.3f}s)"
     )
