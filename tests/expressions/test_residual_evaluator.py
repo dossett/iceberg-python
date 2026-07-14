@@ -41,7 +41,7 @@ from pyiceberg.partitioning import PartitionField, PartitionSpec
 from pyiceberg.schema import Schema
 from pyiceberg.transforms import DayTransform, IdentityTransform
 from pyiceberg.typedef import Record
-from pyiceberg.types import DoubleType, FloatType, IntegerType, NestedField, StringType, TimestampType
+from pyiceberg.types import DoubleType, FloatType, IntegerType, NestedField, StringType, StructType, TimestampType
 
 
 def test_identity_transform_residual() -> None:
@@ -86,6 +86,26 @@ def test_identity_transform_residual() -> None:
     residual = res_eval.residual_for(Record(20170817))
 
     assert residual == AlwaysFalse()
+
+
+def test_partition_schema_reused_across_residuals(monkeypatch: pytest.MonkeyPatch) -> None:
+    schema = Schema(NestedField(50, "dateint", IntegerType()))
+    spec = PartitionSpec(PartitionField(50, 1050, IdentityTransform(), "dateint_part"))
+    partition_type_calls = 0
+    original_partition_type = PartitionSpec.partition_type
+
+    def counting_partition_type(self: PartitionSpec, schema: Schema) -> StructType:
+        nonlocal partition_type_calls
+        partition_type_calls += 1
+        return original_partition_type(self, schema)
+
+    monkeypatch.setattr(PartitionSpec, "partition_type", counting_partition_type)
+
+    res_eval = residual_evaluator_of(spec=spec, expr=EqualTo("dateint", 20170815), case_sensitive=True, schema=schema)
+
+    assert res_eval.residual_for(Record(20170815)) == AlwaysTrue()
+    assert res_eval.residual_for(Record(20170816)) == AlwaysFalse()
+    assert partition_type_calls == 1
 
 
 def test_case_insensitive_identity_transform_residuals() -> None:

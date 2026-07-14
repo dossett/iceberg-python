@@ -28,6 +28,7 @@ from itertools import chain
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from cachetools import LRUCache
 from pydantic import Field
 
 import pyiceberg.expressions.parser as parser
@@ -117,6 +118,9 @@ if TYPE_CHECKING:
 
 ALWAYS_TRUE = AlwaysTrue()
 DOWNCAST_NS_TIMESTAMP_TO_US_ON_WRITE = "downcast-ns-timestamp-to-us-on-write"
+# Retain a small working set for repeated partitions without adding unbounded key
+# storage when scans contain a distinct partition value for every data file.
+_RESIDUAL_CACHE_MAX_SIZE = 128
 
 
 @dataclass()
@@ -2620,7 +2624,21 @@ class ManifestGroupPlanner:
         data_entries: list[ManifestEntry] = []
         delete_index = DeleteFileIndex()
 
-        residual_evaluators: dict[int, Callable[[DataFile], ResidualEvaluator]] = KeyDefaultDict(self._build_residual_evaluator)
+        residual_evaluators: dict[int, ResidualEvaluator] = KeyDefaultDict(self._build_residual_evaluator)
+        # Residuals depend only on the scan configuration, partition spec, and partition value.
+        # Keep the cache local to this planning call and bounded for high-cardinality partition specs.
+        residual_cache: LRUCache[tuple[int, tuple[Any, ...]], BooleanExpression] = LRUCache(maxsize=_RESIDUAL_CACHE_MAX_SIZE)
+
+        def residual_for(data_file: DataFile) -> BooleanExpression:
+            partition = data_file.partition
+            partition_values = tuple(partition[pos] for pos in range(len(partition)))
+            cache_key: tuple[int, tuple[Any, ...]] = data_file.spec_id, partition_values
+            try:
+                return residual_cache[cache_key]
+            except KeyError:
+                residual = residual_evaluators[data_file.spec_id].residual_for(data_file.partition)
+                residual_cache[cache_key] = residual
+                return residual
 
         for manifest_entry in chain.from_iterable(self.plan_manifest_entries(manifests)):
             if not manifest_entry_filter(manifest_entry):
@@ -2644,9 +2662,7 @@ class ManifestGroupPlanner:
                     data_entry.data_file,
                     partition_key=data_entry.data_file.partition,
                 ),
-                residual=residual_evaluators[data_entry.data_file.spec_id](data_entry.data_file).residual_for(
-                    data_entry.data_file.partition
-                ),
+                residual=residual_for(data_entry.data_file),
             )
             for data_entry in data_entries
         ]
@@ -2684,15 +2700,12 @@ class ManifestGroupPlanner:
             include_empty_files,
         ).eval(data_file)
 
-    def _build_residual_evaluator(self, spec_id: int) -> Callable[[DataFile], ResidualEvaluator]:
+    def _build_residual_evaluator(self, spec_id: int) -> ResidualEvaluator:
         spec = self.table_metadata.specs()[spec_id]
 
         from pyiceberg.expressions.visitors import residual_evaluator_of
 
-        # The lambda created here is run in multiple threads.
-        # So we avoid creating _EvaluatorExpression methods bound to a single
-        # shared instance across multiple threads.
-        return lambda datafile: residual_evaluator_of(
+        return residual_evaluator_of(
             spec=spec,
             expr=self.row_filter,
             case_sensitive=self.case_sensitive,

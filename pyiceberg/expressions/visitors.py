@@ -1805,12 +1805,14 @@ class ResidualVisitor(BoundBooleanExpressionVisitor[BooleanExpression], ABC):
     spec: PartitionSpec
     case_sensitive: bool
     expr: BooleanExpression
+    partition_schema: Schema
 
     def __init__(self, schema: Schema, spec: PartitionSpec, case_sensitive: bool, expr: BooleanExpression) -> None:
         self.schema = schema
         self.spec = spec
         self.case_sensitive = case_sensitive
         self.expr = expr
+        self.partition_schema = Schema(*spec.partition_type(schema).fields)
 
     def eval(self, partition_data: Record) -> BooleanExpression:
         self.struct = partition_data
@@ -1931,17 +1933,12 @@ class ResidualVisitor(BoundBooleanExpressionVisitor[BooleanExpression], ABC):
         if parts == []:
             return predicate
 
-        def struct_to_schema(struct: StructType) -> Schema:
-            return Schema(*struct.fields)
-
         for part in parts:
             strict_projection = part.transform.strict_project(part.name, predicate)
             strict_result = None
 
             if strict_projection is not None:
-                bound = strict_projection.bind(
-                    struct_to_schema(self.spec.partition_type(self.schema)), case_sensitive=self.case_sensitive
-                )
+                bound = strict_projection.bind(self.partition_schema, case_sensitive=self.case_sensitive)
                 if isinstance(bound, BoundPredicate):
                     strict_result = super().visit_bound_predicate(bound)
                 else:
@@ -1954,9 +1951,7 @@ class ResidualVisitor(BoundBooleanExpressionVisitor[BooleanExpression], ABC):
             inclusive_projection = part.transform.project(part.name, predicate)
             inclusive_result = None
             if inclusive_projection is not None:
-                bound_inclusive = inclusive_projection.bind(
-                    struct_to_schema(self.spec.partition_type(self.schema)), case_sensitive=self.case_sensitive
-                )
+                bound_inclusive = inclusive_projection.bind(self.partition_schema, case_sensitive=self.case_sensitive)
                 if isinstance(bound_inclusive, BoundPredicate):
                     # using predicate method specific to inclusive
                     inclusive_result = super().visit_bound_predicate(bound_inclusive)
