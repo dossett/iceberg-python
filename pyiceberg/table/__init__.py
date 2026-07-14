@@ -2625,7 +2625,9 @@ class ManifestGroupPlanner:
         data_entries: list[ManifestEntry] = []
         delete_index = DeleteFileIndex()
 
-        residual_evaluators: dict[int, ResidualEvaluator] = KeyDefaultDict(self._build_residual_evaluator)
+        residual_evaluator_factories: dict[int, Callable[[DataFile], ResidualEvaluator]] = KeyDefaultDict(
+            self._build_residual_evaluator
+        )
         referenced_field_ids = extract_field_ids(
             bind(self.table_metadata.schema(), self.row_filter, case_sensitive=self.case_sensitive)
         )
@@ -2648,7 +2650,8 @@ class ManifestGroupPlanner:
             try:
                 return residual_cache[cache_key]
             except KeyError:
-                residual = residual_evaluators[data_file.spec_id].residual_for(data_file.partition)
+                residual_evaluator = residual_evaluator_factories[data_file.spec_id](data_file)
+                residual = residual_evaluator.residual_for(partition)
                 residual_cache[cache_key] = residual
                 return residual
 
@@ -2712,12 +2715,14 @@ class ManifestGroupPlanner:
             include_empty_files,
         ).eval(data_file)
 
-    def _build_residual_evaluator(self, spec_id: int) -> ResidualEvaluator:
+    def _build_residual_evaluator(self, spec_id: int) -> Callable[[DataFile], ResidualEvaluator]:
         spec = self.table_metadata.specs()[spec_id]
 
         from pyiceberg.expressions.visitors import residual_evaluator_of
 
-        return residual_evaluator_of(
+        # ResidualEvaluator stores the current partition while evaluating. Return a
+        # factory so every cache miss uses a fresh, unshared evaluator instance.
+        return lambda _: residual_evaluator_of(
             spec=spec,
             expr=self.row_filter,
             case_sensitive=self.case_sensitive,

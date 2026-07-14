@@ -41,6 +41,17 @@ class _CountingResidualEvaluator:
         return EqualTo("x", self.marker * 10 + partition[0])
 
 
+class _CountingResidualEvaluatorFactory:
+    def __init__(self, marker: int) -> None:
+        self.marker = marker
+        self.evaluators: list[_CountingResidualEvaluator] = []
+
+    def __call__(self, _: DataFile) -> _CountingResidualEvaluator:
+        evaluator = _CountingResidualEvaluator(self.marker)
+        self.evaluators.append(evaluator)
+        return evaluator
+
+
 def _manifest_entry(file_number: int, spec_id: int, partition: tuple[Any, ...]) -> ManifestEntry:
     data_file = DataFile.from_args(
         content=DataFileContent.DATA,
@@ -88,16 +99,16 @@ def test_manifest_group_planner_reuses_residuals_by_spec_and_partition(table_v2:
         _manifest_entry(3, spec_id=1, partition=(1,)),
         _manifest_entry(4, spec_id=0, partition=(2,)),
     ]
-    evaluators = {0: _CountingResidualEvaluator(0), 1: _CountingResidualEvaluator(1)}
+    evaluator_factories = {0: _CountingResidualEvaluatorFactory(0), 1: _CountingResidualEvaluatorFactory(1)}
     planner = _planner(table_v2, EqualTo("x", 1), _identity_spec(0, 1), _identity_spec(1, 1))
 
     monkeypatch.setattr(planner, "plan_manifest_entries", lambda _: iter([entries]))
-    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda spec_id: evaluators[spec_id])
+    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda spec_id: evaluator_factories[spec_id])
 
     tasks = list(planner.plan_files([]))
 
-    assert evaluators[0].calls == [(1,), (2,)]
-    assert evaluators[1].calls == [(1,)]
+    assert [evaluator.calls for evaluator in evaluator_factories[0].evaluators] == [[(1,)], [(2,)]]
+    assert [evaluator.calls for evaluator in evaluator_factories[1].evaluators] == [[(1,)]]
     assert [task.residual for task in tasks] == [
         EqualTo("x", 1),
         EqualTo("x", 1),
@@ -113,15 +124,15 @@ def test_manifest_group_planner_ignores_unreferenced_partition_fields(table_v2: 
         _manifest_entry(1, spec_id=0, partition=(1, 20)),
         _manifest_entry(2, spec_id=0, partition=(2, 30)),
     ]
-    evaluator = _CountingResidualEvaluator(0)
+    evaluator_factory = _CountingResidualEvaluatorFactory(0)
     planner = _planner(table_v2, EqualTo("x", 1), _identity_spec(0, 1, 2))
 
     monkeypatch.setattr(planner, "plan_manifest_entries", lambda _: iter([entries]))
-    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda _: evaluator)
+    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda _: evaluator_factory)
 
     tasks = list(planner.plan_files([]))
 
-    assert evaluator.calls == [(1, 10), (2, 30)]
+    assert [evaluator.calls for evaluator in evaluator_factory.evaluators] == [[(1, 10)], [(2, 30)]]
     assert [task.residual for task in tasks] == [EqualTo("x", 1), EqualTo("x", 1), EqualTo("x", 2)]
 
 
@@ -130,15 +141,15 @@ def test_manifest_group_planner_includes_referenced_partition_fields(table_v2: T
         _manifest_entry(0, spec_id=0, partition=(1, 10)),
         _manifest_entry(1, spec_id=0, partition=(1, 20)),
     ]
-    evaluator = _CountingResidualEvaluator(0)
+    evaluator_factory = _CountingResidualEvaluatorFactory(0)
     planner = _planner(table_v2, And(EqualTo("x", 1), EqualTo("y", 10)), _identity_spec(0, 1, 2))
 
     monkeypatch.setattr(planner, "plan_manifest_entries", lambda _: iter([entries]))
-    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda _: evaluator)
+    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda _: evaluator_factory)
 
     list(planner.plan_files([]))
 
-    assert evaluator.calls == [(1, 10), (1, 20)]
+    assert [evaluator.calls for evaluator in evaluator_factory.evaluators] == [[(1, 10)], [(1, 20)]]
 
 
 def test_manifest_group_planner_includes_all_partition_transforms_for_referenced_source(
@@ -155,15 +166,15 @@ def test_manifest_group_planner_includes_all_partition_transforms_for_referenced
         _manifest_entry(1, spec_id=0, partition=(5, 1, 20)),
         _manifest_entry(2, spec_id=0, partition=(5, 0, 30)),
     ]
-    evaluator = _CountingResidualEvaluator(0)
+    evaluator_factory = _CountingResidualEvaluatorFactory(0)
     planner = _planner(table_v2, EqualTo("x", 1), spec)
 
     monkeypatch.setattr(planner, "plan_manifest_entries", lambda _: iter([entries]))
-    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda _: evaluator)
+    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda _: evaluator_factory)
 
     list(planner.plan_files([]))
 
-    assert evaluator.calls == [(5, 0, 10), (5, 1, 20)]
+    assert [evaluator.calls for evaluator in evaluator_factory.evaluators] == [[(5, 0, 10)], [(5, 1, 20)]]
 
 
 def test_manifest_group_planner_bounds_residual_cache(table_v2: Table, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -173,16 +184,16 @@ def test_manifest_group_planner_bounds_residual_cache(table_v2: Table, monkeypat
         _manifest_entry(2, spec_id=0, partition=(3,)),
         _manifest_entry(3, spec_id=0, partition=(1,)),
     ]
-    evaluator = _CountingResidualEvaluator(0)
+    evaluator_factory = _CountingResidualEvaluatorFactory(0)
     planner = _planner(table_v2, EqualTo("x", 1), _identity_spec(0, 1))
 
     monkeypatch.setattr(table_module, "_RESIDUAL_CACHE_MAX_SIZE", 2)
     monkeypatch.setattr(planner, "plan_manifest_entries", lambda _: iter([entries]))
-    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda _: evaluator)
+    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda _: evaluator_factory)
 
     tasks = list(planner.plan_files([]))
 
-    assert evaluator.calls == [(1,), (2,), (3,), (1,)]
+    assert [evaluator.calls for evaluator in evaluator_factory.evaluators] == [[(1,)], [(2,)], [(3,)], [(1,)]]
     assert [task.residual for task in tasks] == [
         EqualTo("x", 1),
         EqualTo("x", 2),
