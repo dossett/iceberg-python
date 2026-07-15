@@ -31,7 +31,7 @@ from pyiceberg.expressions import And, BooleanExpression, EqualTo, GreaterThanOr
 from pyiceberg.manifest import DataFile, FileFormat
 from pyiceberg.partitioning import PartitionField, PartitionSpec
 from pyiceberg.schema import Schema
-from pyiceberg.table import ManifestGroupPlanner, Table
+from pyiceberg.table import DataScan, Table
 from pyiceberg.table.metadata import TableMetadataV2
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.typedef import Record
@@ -90,11 +90,11 @@ def test_partition_evaluator_reuse(table_v2: Table, files_per_manifest: int) -> 
         partition_specs=[spec],
         default_spec_id=spec.spec_id,
     )
-    planner = ManifestGroupPlanner(table_metadata=metadata, io=table_v2.io, row_filter=_partition_filter())
+    scan = DataScan(table_metadata=metadata, io=table_v2.io, row_filter=_partition_filter())
     data_files = [_data_file(file_number) for file_number in range(num_files)]
 
     def evaluate_files() -> int:
-        partition_evaluator = planner._build_partition_evaluator(spec.spec_id)
+        partition_evaluator = scan._build_partition_evaluator(spec.spec_id)
         matches = 0
         for start in range(0, num_files, files_per_manifest):
             matches += sum(partition_evaluator(data_file) for data_file in data_files[start : start + files_per_manifest])

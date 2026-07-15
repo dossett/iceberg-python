@@ -35,7 +35,7 @@ from pyiceberg.expressions import And, BooleanExpression, EqualTo, GreaterThanOr
 from pyiceberg.manifest import DataFile, DataFileContent, FileFormat, ManifestEntry, ManifestEntryStatus
 from pyiceberg.partitioning import PartitionField, PartitionSpec
 from pyiceberg.schema import Schema
-from pyiceberg.table import ManifestGroupPlanner, Table
+from pyiceberg.table import DataScan, Table
 from pyiceberg.table.metadata import TableMetadataV2
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.typedef import Record
@@ -105,13 +105,13 @@ def test_residual_planning(table_v2: Table, monkeypatch: pytest.MonkeyPatch, num
         partition_specs=[spec],
         default_spec_id=spec.spec_id,
     )
-    planner = ManifestGroupPlanner(table_metadata=metadata, io=table_v2.io, row_filter=_row_filter())
+    scan = DataScan(table_metadata=metadata, io=table_v2.io, row_filter=_row_filter())
 
-    monkeypatch.setattr(planner, "plan_manifest_entries", lambda _: iter([entries]))
+    monkeypatch.setattr(scan, "scan_plan_helper", lambda: iter([entries]))
 
-    timings = timeit.repeat(lambda: list(planner.plan_files([])), number=1, repeat=3)
+    timings = timeit.repeat(lambda: list(scan._plan_files_local()), number=1, repeat=3)
 
-    assert len(list(planner.plan_files([]))) == num_files
+    assert len(list(scan._plan_files_local())) == num_files
     print(
         f"Planned {num_files} files across {num_relevant_partitions} relevant partitions "
         f"with a 15-leaf predicate in {statistics.mean(timings):.3f}s (best: {min(timings):.3f}s)"

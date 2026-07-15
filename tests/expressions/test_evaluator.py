@@ -44,7 +44,14 @@ from pyiceberg.expressions import (
     Or,
     StartsWith,
 )
-from pyiceberg.expressions.visitors import _InclusiveMetricsEvaluator, _StrictMetricsEvaluator
+from pyiceberg.expressions.visitors import (
+    ROWS_CANNOT_MATCH,
+    ROWS_MIGHT_MATCH,
+    ROWS_MIGHT_NOT_MATCH,
+    ROWS_MUST_MATCH,
+    _InclusiveMetricsEvaluator,
+    _StrictMetricsEvaluator,
+)
 from pyiceberg.manifest import DataFile, FileFormat
 from pyiceberg.schema import Schema
 from pyiceberg.typedef import Record
@@ -53,6 +60,7 @@ from pyiceberg.types import (
     FloatType,
     IcebergType,
     IntegerType,
+    LongType,
     NestedField,
     PrimitiveType,
     StringType,

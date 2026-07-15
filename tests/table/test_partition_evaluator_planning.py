@@ -26,7 +26,7 @@ from pyiceberg.expressions import BooleanExpression, GreaterThan
 from pyiceberg.io import FileIO
 from pyiceberg.manifest import DataFile, FileFormat, ManifestContent, ManifestEntry, ManifestFile
 from pyiceberg.schema import Schema
-from pyiceberg.table import ManifestGroupPlanner, Table
+from pyiceberg.table import DataScan, Table
 from pyiceberg.typedef import Record, StructProtocol
 
 
@@ -69,8 +69,8 @@ def test_partition_evaluator_prepares_once_per_spec(table_v2: Table, monkeypatch
         return evaluate
 
     monkeypatch.setattr(table_module, "expression_evaluator", counting_expression_evaluator)
-    planner = ManifestGroupPlanner(table_metadata=table_v2.metadata, io=table_v2.io, row_filter=GreaterThan("x", 5))
-    partition_evaluator = planner._build_partition_evaluator(0)
+    scan = DataScan(table_metadata=table_v2.metadata, io=table_v2.io, row_filter=GreaterThan("x", 5))
+    partition_evaluator = scan._build_partition_evaluator(0)
 
     assert len(evaluator_calls) == 1
     assert not partition_evaluator(_data_file(1, 1))
@@ -78,12 +78,15 @@ def test_partition_evaluator_prepares_once_per_spec(table_v2: Table, monkeypatch
     assert evaluator_calls == [[1, 10]]
 
 
-def test_manifest_group_planner_shares_partition_evaluator_across_manifests(
-    table_v2: Table, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    planner = ManifestGroupPlanner(table_metadata=table_v2.metadata, io=table_v2.io, row_filter=GreaterThan("x", 5))
+def test_data_scan_shares_partition_evaluator_across_manifests(table_v2: Table, monkeypatch: pytest.MonkeyPatch) -> None:
+    scan = DataScan(table_metadata=table_v2.metadata, io=table_v2.io, row_filter=GreaterThan("x", 5))
     built_specs: list[int] = []
     opened_evaluators: list[Callable[[DataFile], bool]] = []
+    manifests = [_manifest_file(1), _manifest_file(2)]
+
+    class Snapshot:
+        def manifests(self, _: FileIO) -> list[ManifestFile]:
+            return manifests
 
     def build_partition_evaluator(spec_id: int) -> Callable[[DataFile], bool]:
         built_specs.append(spec_id)
@@ -98,11 +101,13 @@ def test_manifest_group_planner_shares_partition_evaluator_across_manifests(
         opened_evaluators.append(partition_evaluator)
         return []
 
-    monkeypatch.setattr(planner, "_build_manifest_evaluator", lambda _: lambda _: True)
-    monkeypatch.setattr(planner, "_build_partition_evaluator", build_partition_evaluator)
+    monkeypatch.setattr(scan, "snapshot", lambda: Snapshot())
+    monkeypatch.setattr(scan, "_build_manifest_evaluator", lambda _: lambda _: True)
+    monkeypatch.setattr(scan, "_build_partition_evaluator", build_partition_evaluator)
+    monkeypatch.setattr(scan, "_build_metrics_evaluator", lambda: lambda _: True)
     monkeypatch.setattr(table_module, "_open_manifest", open_manifest)
 
-    list(planner.plan_manifest_entries([_manifest_file(1), _manifest_file(2)]))
+    list(scan.scan_plan_helper())
 
     assert built_specs == [0]
     assert len(opened_evaluators) == 2

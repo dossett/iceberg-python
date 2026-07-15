@@ -34,7 +34,7 @@ from pyiceberg.conversions import to_bytes
 from pyiceberg.expressions import And, BooleanExpression, EqualTo, GreaterThanOrEqual, LessThanOrEqual, Or
 from pyiceberg.manifest import DataFile, FileFormat, ManifestContent, ManifestFile
 from pyiceberg.schema import Schema
-from pyiceberg.table import ManifestGroupPlanner, Table
+from pyiceberg.table import DataScan, Table
 from pyiceberg.typedef import Record
 from pyiceberg.types import LongType, NestedField
 from pyiceberg.utils.concurrent import ExecutorFactory
@@ -112,13 +112,17 @@ def test_metrics_evaluator_reuse(
         schema_id=table_v2.metadata.current_schema_id,
     )
     metadata = table_v2.metadata.model_copy(update={"schemas": [schema]})
-    planner = ManifestGroupPlanner(table_metadata=metadata, io=table_v2.io, row_filter=_metrics_filter())
+    scan = DataScan(table_metadata=metadata, io=table_v2.io, row_filter=_metrics_filter())
     data_files = [_data_file(file_number) for file_number in range(num_files)]
     manifests = [_manifest_file(manifest_number) for manifest_number in range(0, num_files, files_per_manifest)]
     files_by_manifest = {
         manifest.manifest_path: data_files[start : start + files_per_manifest]
         for manifest, start in zip(manifests, range(0, num_files, files_per_manifest), strict=True)
     }
+
+    class Snapshot:
+        def manifests(self, _: Any) -> list[ManifestFile]:
+            return manifests
 
     def open_manifest(
         _io: Any,
@@ -132,13 +136,14 @@ def test_metrics_evaluator_reuse(
             if partition_evaluator(data_file) and metrics_evaluator(data_file)
         ]
 
-    monkeypatch.setattr(planner, "_build_manifest_evaluator", lambda _: lambda _: True)
-    monkeypatch.setattr(planner, "_build_partition_evaluator", lambda _: lambda _: partition_matches)
+    monkeypatch.setattr(scan, "snapshot", lambda: Snapshot())
+    monkeypatch.setattr(scan, "_build_manifest_evaluator", lambda _: lambda _: True)
+    monkeypatch.setattr(scan, "_build_partition_evaluator", lambda _: lambda _: partition_matches)
     monkeypatch.setattr(table_module, "_open_manifest", open_manifest)
     monkeypatch.setattr(ExecutorFactory, "get_or_create", staticmethod(lambda: _SerialExecutor()))
 
     def evaluate_files() -> int:
-        return sum(len(entries) for entries in planner.plan_manifest_entries(manifests))
+        return sum(len(entries) for entries in scan.scan_plan_helper())
 
     assert evaluate_files() == (67 if partition_matches else 0)
     number = 1 if partition_matches else (1_000 if files_per_manifest == 1_000 else 10)

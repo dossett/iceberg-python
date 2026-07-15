@@ -25,7 +25,7 @@ import pyiceberg.table as table_module
 from pyiceberg.expressions import And, BooleanExpression, EqualTo
 from pyiceberg.manifest import DataFile, DataFileContent, FileFormat, ManifestEntry, ManifestEntryStatus
 from pyiceberg.partitioning import PartitionField, PartitionSpec
-from pyiceberg.table import ManifestGroupPlanner, Table
+from pyiceberg.table import DataScan, Table
 from pyiceberg.transforms import BucketTransform, IdentityTransform
 from pyiceberg.typedef import Record
 
@@ -75,12 +75,12 @@ def _identity_spec(spec_id: int, *source_ids: int) -> PartitionSpec:
     )
 
 
-def _planner(table_v2: Table, row_filter: BooleanExpression, *partition_specs: PartitionSpec) -> ManifestGroupPlanner:
+def _scan(table_v2: Table, row_filter: BooleanExpression, *partition_specs: PartitionSpec) -> DataScan:
     metadata = table_v2.metadata.model_copy(update={"partition_specs": list(partition_specs)})
-    return ManifestGroupPlanner(table_metadata=metadata, io=table_v2.io, row_filter=row_filter)
+    return DataScan(table_metadata=metadata, io=table_v2.io, row_filter=row_filter)
 
 
-def test_manifest_group_planner_reuses_residuals_by_spec_and_partition(table_v2: Table, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_data_scan_reuses_residuals_by_spec_and_partition(table_v2: Table, monkeypatch: pytest.MonkeyPatch) -> None:
     entries = [
         _manifest_entry(0, spec_id=0, partition=(1,)),
         _manifest_entry(1, spec_id=0, partition=(1,)),
@@ -90,16 +90,16 @@ def test_manifest_group_planner_reuses_residuals_by_spec_and_partition(table_v2:
     ]
     evaluators = {0: _CountingResidualEvaluator(0), 1: _CountingResidualEvaluator(1)}
     evaluator_builds: list[int] = []
-    planner = _planner(table_v2, EqualTo("x", 1), _identity_spec(0, 1), _identity_spec(1, 1))
+    scan = _scan(table_v2, EqualTo("x", 1), _identity_spec(0, 1), _identity_spec(1, 1))
 
     def build_evaluator(spec_id: int) -> _CountingResidualEvaluator:
         evaluator_builds.append(spec_id)
         return evaluators[spec_id]
 
-    monkeypatch.setattr(planner, "plan_manifest_entries", lambda _: iter([entries]))
-    monkeypatch.setattr(planner, "_build_residual_evaluator", build_evaluator)
+    monkeypatch.setattr(scan, "scan_plan_helper", lambda: iter([entries]))
+    monkeypatch.setattr(scan, "_build_residual_evaluator", build_evaluator)
 
-    tasks = list(planner.plan_files([]))
+    tasks = list(scan._plan_files_local())
 
     assert evaluator_builds == [0, 1]
     assert evaluators[0].calls == [(1,), (2,)]
@@ -113,41 +113,41 @@ def test_manifest_group_planner_reuses_residuals_by_spec_and_partition(table_v2:
     ]
 
 
-def test_manifest_group_planner_ignores_unreferenced_partition_fields(table_v2: Table, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_data_scan_ignores_unreferenced_partition_fields(table_v2: Table, monkeypatch: pytest.MonkeyPatch) -> None:
     entries = [
         _manifest_entry(0, spec_id=0, partition=(1, 10)),
         _manifest_entry(1, spec_id=0, partition=(1, 20)),
         _manifest_entry(2, spec_id=0, partition=(2, 30)),
     ]
     evaluator = _CountingResidualEvaluator(0)
-    planner = _planner(table_v2, EqualTo("x", 1), _identity_spec(0, 1, 2))
+    scan = _scan(table_v2, EqualTo("x", 1), _identity_spec(0, 1, 2))
 
-    monkeypatch.setattr(planner, "plan_manifest_entries", lambda _: iter([entries]))
-    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda _: evaluator)
+    monkeypatch.setattr(scan, "scan_plan_helper", lambda: iter([entries]))
+    monkeypatch.setattr(scan, "_build_residual_evaluator", lambda _: evaluator)
 
-    tasks = list(planner.plan_files([]))
+    tasks = list(scan._plan_files_local())
 
     assert evaluator.calls == [(1, 10), (2, 30)]
     assert [task.residual for task in tasks] == [EqualTo("x", 1), EqualTo("x", 1), EqualTo("x", 2)]
 
 
-def test_manifest_group_planner_includes_referenced_partition_fields(table_v2: Table, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_data_scan_includes_referenced_partition_fields(table_v2: Table, monkeypatch: pytest.MonkeyPatch) -> None:
     entries = [
         _manifest_entry(0, spec_id=0, partition=(1, 10)),
         _manifest_entry(1, spec_id=0, partition=(1, 20)),
     ]
     evaluator = _CountingResidualEvaluator(0)
-    planner = _planner(table_v2, And(EqualTo("x", 1), EqualTo("y", 10)), _identity_spec(0, 1, 2))
+    scan = _scan(table_v2, And(EqualTo("x", 1), EqualTo("y", 10)), _identity_spec(0, 1, 2))
 
-    monkeypatch.setattr(planner, "plan_manifest_entries", lambda _: iter([entries]))
-    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda _: evaluator)
+    monkeypatch.setattr(scan, "scan_plan_helper", lambda: iter([entries]))
+    monkeypatch.setattr(scan, "_build_residual_evaluator", lambda _: evaluator)
 
-    list(planner.plan_files([]))
+    list(scan._plan_files_local())
 
     assert evaluator.calls == [(1, 10), (1, 20)]
 
 
-def test_manifest_group_planner_includes_all_partition_transforms_for_referenced_source(
+def test_data_scan_includes_all_partition_transforms_for_referenced_source(
     table_v2: Table, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spec = PartitionSpec(
@@ -162,17 +162,17 @@ def test_manifest_group_planner_includes_all_partition_transforms_for_referenced
         _manifest_entry(2, spec_id=0, partition=(5, 0, 30)),
     ]
     evaluator = _CountingResidualEvaluator(0)
-    planner = _planner(table_v2, EqualTo("x", 1), spec)
+    scan = _scan(table_v2, EqualTo("x", 1), spec)
 
-    monkeypatch.setattr(planner, "plan_manifest_entries", lambda _: iter([entries]))
-    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda _: evaluator)
+    monkeypatch.setattr(scan, "scan_plan_helper", lambda: iter([entries]))
+    monkeypatch.setattr(scan, "_build_residual_evaluator", lambda _: evaluator)
 
-    list(planner.plan_files([]))
+    list(scan._plan_files_local())
 
     assert evaluator.calls == [(5, 0, 10), (5, 1, 20)]
 
 
-def test_manifest_group_planner_bounds_residual_cache(table_v2: Table, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_data_scan_bounds_residual_cache(table_v2: Table, monkeypatch: pytest.MonkeyPatch) -> None:
     entries = [
         _manifest_entry(0, spec_id=0, partition=(1,)),
         _manifest_entry(1, spec_id=0, partition=(2,)),
@@ -180,13 +180,13 @@ def test_manifest_group_planner_bounds_residual_cache(table_v2: Table, monkeypat
         _manifest_entry(3, spec_id=0, partition=(1,)),
     ]
     evaluator = _CountingResidualEvaluator(0)
-    planner = _planner(table_v2, EqualTo("x", 1), _identity_spec(0, 1))
+    scan = _scan(table_v2, EqualTo("x", 1), _identity_spec(0, 1))
 
     monkeypatch.setattr(table_module, "_RESIDUAL_CACHE_MAX_SIZE", 2)
-    monkeypatch.setattr(planner, "plan_manifest_entries", lambda _: iter([entries]))
-    monkeypatch.setattr(planner, "_build_residual_evaluator", lambda _: evaluator)
+    monkeypatch.setattr(scan, "scan_plan_helper", lambda: iter([entries]))
+    monkeypatch.setattr(scan, "_build_residual_evaluator", lambda _: evaluator)
 
-    tasks = list(planner.plan_files([]))
+    tasks = list(scan._plan_files_local())
 
     assert evaluator.calls == [(1,), (2,), (3,), (1,)]
     assert [task.residual for task in tasks] == [

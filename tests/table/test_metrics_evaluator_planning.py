@@ -26,7 +26,7 @@ from pyiceberg.expressions import BooleanExpression, EqualTo
 from pyiceberg.io import FileIO
 from pyiceberg.manifest import DataFile, FileFormat, ManifestContent, ManifestEntry, ManifestFile
 from pyiceberg.schema import Schema
-from pyiceberg.table import ManifestGroupPlanner, Table
+from pyiceberg.table import DataScan, Table
 from pyiceberg.typedef import Record
 
 
@@ -70,23 +70,26 @@ def test_build_metrics_evaluator_prepares_one_instance(table_v2: Table, monkeypa
 
     instances: list[CountingMetricsEvaluator] = []
     monkeypatch.setattr(table_module, "_InclusiveMetricsEvaluator", CountingMetricsEvaluator)
-    planner = ManifestGroupPlanner(table_metadata=table_v2.metadata, io=table_v2.io, row_filter=EqualTo("x", 10))
+    scan = DataScan(table_metadata=table_v2.metadata, io=table_v2.io, row_filter=EqualTo("x", 10))
     first_file = _data_file(1)
     second_file = _data_file(2)
 
-    metrics_evaluator = planner._build_metrics_evaluator()
+    metrics_evaluator = scan._build_metrics_evaluator()
     assert len(instances) == 1
     assert metrics_evaluator(first_file)
     assert metrics_evaluator(second_file)
     assert instances[0].calls == [first_file, second_file]
 
 
-def test_manifest_group_planner_shares_metrics_evaluator_across_manifests(
-    table_v2: Table, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    planner = ManifestGroupPlanner(table_metadata=table_v2.metadata, io=table_v2.io, row_filter=EqualTo("x", 10))
+def test_data_scan_shares_metrics_evaluator_across_manifests(table_v2: Table, monkeypatch: pytest.MonkeyPatch) -> None:
+    scan = DataScan(table_metadata=table_v2.metadata, io=table_v2.io, row_filter=EqualTo("x", 10))
     built_evaluators: list[Callable[[DataFile], bool]] = []
     opened_evaluators: list[Callable[[DataFile], bool]] = []
+    manifests = [_manifest_file(1), _manifest_file(2)]
+
+    class Snapshot:
+        def manifests(self, _: FileIO) -> list[ManifestFile]:
+            return manifests
 
     def build_metrics_evaluator() -> Callable[[DataFile], bool]:
         def evaluator(_: DataFile) -> bool:
@@ -104,12 +107,13 @@ def test_manifest_group_planner_shares_metrics_evaluator_across_manifests(
         opened_evaluators.append(metrics_evaluator)
         return []
 
-    monkeypatch.setattr(planner, "_build_manifest_evaluator", lambda _: lambda _: True)
-    monkeypatch.setattr(planner, "_build_partition_evaluator", lambda _: lambda _: True)
-    monkeypatch.setattr(planner, "_build_metrics_evaluator", build_metrics_evaluator)
+    monkeypatch.setattr(scan, "snapshot", lambda: Snapshot())
+    monkeypatch.setattr(scan, "_build_manifest_evaluator", lambda _: lambda _: True)
+    monkeypatch.setattr(scan, "_build_partition_evaluator", lambda _: lambda _: True)
+    monkeypatch.setattr(scan, "_build_metrics_evaluator", build_metrics_evaluator)
     monkeypatch.setattr(table_module, "_open_manifest", open_manifest)
 
-    list(planner.plan_manifest_entries([_manifest_file(1), _manifest_file(2)]))
+    list(scan.scan_plan_helper())
 
     assert len(built_evaluators) == 1
     assert len(opened_evaluators) == 2
