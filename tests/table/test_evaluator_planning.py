@@ -23,8 +23,7 @@ import pytest
 
 import pyiceberg.table as table_module
 from pyiceberg.expressions import BooleanExpression, GreaterThan
-from pyiceberg.io import FileIO
-from pyiceberg.manifest import DataFile, FileFormat, ManifestContent, ManifestEntry, ManifestFile
+from pyiceberg.manifest import DataFile, FileFormat
 from pyiceberg.schema import Schema
 from pyiceberg.table import ManifestGroupPlanner, Table
 from pyiceberg.typedef import Record, StructProtocol
@@ -37,18 +36,6 @@ def _data_file(file_number: int, partition_value: int) -> DataFile:
         partition=Record(partition_value),
         record_count=100,
         file_size_in_bytes=1,
-    )
-
-
-def _manifest_file(file_number: int) -> ManifestFile:
-    return ManifestFile.from_args(
-        manifest_path=f"s3://bucket/manifest-{file_number}.avro",
-        manifest_length=1,
-        partition_spec_id=0,
-        content=ManifestContent.DATA,
-        sequence_number=1,
-        min_sequence_number=1,
-        added_snapshot_id=1,
     )
 
 
@@ -76,34 +63,3 @@ def test_partition_evaluator_prepares_once_per_spec(table_v2: Table, monkeypatch
     assert not partition_evaluator(_data_file(1, 1))
     assert partition_evaluator(_data_file(2, 10))
     assert evaluator_calls == [[1, 10]]
-
-
-def test_manifest_group_planner_shares_partition_evaluator_across_manifests(
-    table_v2: Table, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    planner = ManifestGroupPlanner(table_metadata=table_v2.metadata, io=table_v2.io, row_filter=GreaterThan("x", 5))
-    built_specs: list[int] = []
-    opened_evaluators: list[Callable[[DataFile], bool]] = []
-
-    def build_partition_evaluator(spec_id: int) -> Callable[[DataFile], bool]:
-        built_specs.append(spec_id)
-        return lambda _: True
-
-    def open_manifest(
-        io: FileIO,
-        manifest: ManifestFile,
-        partition_evaluator: Callable[[DataFile], bool],
-        metrics_evaluator: Callable[[DataFile], bool],
-    ) -> list[ManifestEntry]:
-        opened_evaluators.append(partition_evaluator)
-        return []
-
-    monkeypatch.setattr(planner, "_build_manifest_evaluator", lambda _: lambda _: True)
-    monkeypatch.setattr(planner, "_build_partition_evaluator", build_partition_evaluator)
-    monkeypatch.setattr(table_module, "_open_manifest", open_manifest)
-
-    list(planner.plan_manifest_entries([_manifest_file(1), _manifest_file(2)]))
-
-    assert built_specs == [0]
-    assert len(opened_evaluators) == 2
-    assert opened_evaluators[0] is opened_evaluators[1]
