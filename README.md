@@ -24,7 +24,7 @@ The documentation is available at [https://py.iceberg.apache.org/](https://py.ic
 ## Etsy Fork Release
 
 The Etsy-only `0.11.1+etsy.1` release is built from the `0.11.1-perf` branch and published manually from a developer
-workstation to the `batch-engines-dataflow-prod` PyPI repository in JFrog Artifactory. This repository does not yet
+workstation to the `exploration-platform-prod` PyPI repository in JFrog Artifactory. This repository does not yet
 automate releases. If another fork release is needed, replace the manual process with a CI build and publish workflow
 using Secrets Broker-managed credentials.
 
