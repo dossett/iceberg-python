@@ -23,7 +23,7 @@ import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, lru_cache
 from itertools import chain
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -37,6 +37,7 @@ from pyiceberg.expressions.visitors import (
     _InclusiveMetricsEvaluator,
     bind,
     expression_evaluator,
+    extract_field_ids,
     inclusive_projection,
     manifest_evaluator,
 )
@@ -100,7 +101,7 @@ from pyiceberg.typedef import (
 from pyiceberg.types import strtobool
 from pyiceberg.utils.concurrent import ExecutorFactory
 from pyiceberg.utils.config import Config
-from pyiceberg.utils.properties import property_as_bool
+from pyiceberg.utils.properties import property_as_bool, property_as_int
 
 if TYPE_CHECKING:
     import bodo.pandas as bd
@@ -128,6 +129,9 @@ class UpsertResult:
 
 
 class TableProperties:
+    PARTITION_FILTER_CACHE_MAX_SIZE = "read.partition-filter-cache.max-size"
+    PARTITION_FILTER_CACHE_MAX_SIZE_DEFAULT = 128
+
     PARQUET_ROW_GROUP_SIZE_BYTES = "write.parquet.row-group-size-bytes"
     PARQUET_ROW_GROUP_SIZE_BYTES_DEFAULT = 128 * 1024 * 1024  # 128 MB
 
@@ -2664,11 +2668,33 @@ class ManifestGroupPlanner:
         partition_type = spec.partition_type(self.table_metadata.schema())
         partition_schema = Schema(*partition_type.fields)
         partition_expr = self.partition_filters[spec_id]
+        # Prepared evaluators are stateless and shared by all manifests using this spec.
         evaluator = expression_evaluator(partition_schema, partition_expr, self.case_sensitive)
 
-        # Expression evaluators keep input-specific state local to each call, so the
-        # prepared evaluator can be shared by every manifest using this spec.
-        return lambda data_file: evaluator(data_file.partition)
+        cache_max_size = property_as_int(
+            self.options,
+            TableProperties.PARTITION_FILTER_CACHE_MAX_SIZE,
+            TableProperties.PARTITION_FILTER_CACHE_MAX_SIZE_DEFAULT,
+        )
+        if cache_max_size is None or cache_max_size < 0:
+            raise ValueError(f"{TableProperties.PARTITION_FILTER_CACHE_MAX_SIZE} must be a non-negative integer")
+        if cache_max_size == 0:
+            return lambda data_file: evaluator(data_file.partition)
+
+        referenced_field_ids = extract_field_ids(bind(partition_schema, partition_expr, self.case_sensitive))
+        # Exclude partition fields that cannot affect the projected expression.
+        cache_key_positions = tuple(
+            pos for pos, partition_field in enumerate(partition_type.fields) if partition_field.field_id in referenced_field_ids
+        )
+
+        @lru_cache(maxsize=cache_max_size)
+        def evaluate_partition(cache_key: tuple[Any, ...]) -> bool:
+            partition_values: list[Any] = [None] * len(partition_type.fields)
+            for pos, value in zip(cache_key_positions, cache_key, strict=True):
+                partition_values[pos] = value
+            return evaluator(Record(*partition_values))
+
+        return lambda data_file: evaluate_partition(tuple(data_file.partition[pos] for pos in cache_key_positions))
 
     def _build_metrics_evaluator(self) -> Callable[[DataFile], bool]:
         schema = self.table_metadata.schema()
